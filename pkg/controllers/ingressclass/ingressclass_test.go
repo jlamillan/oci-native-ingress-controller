@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	ociloadbalancer "github.com/oracle/oci-go-sdk/v65/loadbalancer"
+	ocilogging "github.com/oracle/oci-go-sdk/v65/logging"
 	"github.com/oracle/oci-go-sdk/v65/waf"
 	"github.com/oracle/oci-native-ingress-controller/pkg/client"
 	"github.com/oracle/oci-native-ingress-controller/pkg/exception"
@@ -18,6 +19,7 @@ import (
 	"github.com/oracle/oci-native-ingress-controller/api/v1beta1"
 
 	lb "github.com/oracle/oci-native-ingress-controller/pkg/loadbalancer"
+	Logging "github.com/oracle/oci-native-ingress-controller/pkg/logging"
 	ociclient "github.com/oracle/oci-native-ingress-controller/pkg/oci/client"
 	"github.com/oracle/oci-native-ingress-controller/pkg/util"
 	WAF "github.com/oracle/oci-native-ingress-controller/pkg/waf"
@@ -199,6 +201,52 @@ func TestSetupWebApplicationFirewall_NoPolicySet(t *testing.T) {
 	Expect(err).Should(BeNil())
 }
 
+func TestEnsureLoadBalancerWithLoggingAnnotations(t *testing.T) {
+	RegisterTestingT(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	annotations := map[string]string{
+		util.IngressClassLoadBalancerIdAnnotation:   "id",
+		util.IngressClassAccessLogGroupIdAnnotation: "access-group",
+		util.IngressClassErrorLogGroupIdAnnotation:  "error-group",
+	}
+	ingressClassList := util.GetIngressClassResourceWithAnnotation("ingressclass-with-logging", annotations, "oci.oraclecloud.com/native-ingress-controller")
+	mockLoggingClient := &MockLoggingClient{}
+	loggingClient := &Logging.Client{LoggingClient: mockLoggingClient}
+	c := inits(ctx, ingressClassList, loggingClient)
+
+	err := c.ensureLoadBalancer(getContextWithClient(c, ctx), &ingressClassList.Items[0])
+	Expect(err).Should(BeNil())
+	Expect(mockLoggingClient.createRequests).Should(HaveLen(2))
+
+	categories := map[string]bool{}
+	for _, request := range mockLoggingClient.createRequests {
+		source := request.CreateLogDetails.Configuration.Source.(ocilogging.OciService)
+		categories[*source.Category] = true
+		Expect(*source.Service).Should(Equal("loadbalancer"))
+		Expect(*source.Resource).Should(Equal("id"))
+	}
+	Expect(categories[util.LoadBalancerAccessLogCategory]).Should(BeTrue())
+	Expect(categories[util.LoadBalancerErrorLogCategory]).Should(BeTrue())
+}
+
+func TestEnsureLoadBalancerWithLoggingAnnotationsNoLoggingClient(t *testing.T) {
+	RegisterTestingT(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	annotations := map[string]string{
+		util.IngressClassLoadBalancerIdAnnotation:   "id",
+		util.IngressClassAccessLogGroupIdAnnotation: "access-group",
+	}
+	ingressClassList := util.GetIngressClassResourceWithAnnotation("ingressclass-with-logging", annotations, "oci.oraclecloud.com/native-ingress-controller")
+	c := inits(ctx, ingressClassList)
+
+	err := c.ensureLoadBalancer(getContextWithClient(c, ctx), &ingressClassList.Items[0])
+	Expect(err).Should(MatchError("logging client not found in the context"))
+}
+
 func TestCheckForIngressClassParameterUpdates(t *testing.T) {
 	RegisterTestingT(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -268,7 +316,7 @@ func getContextWithClient(c *Controller, ctx context.Context) context.Context {
 	return ctx
 }
 
-func inits(ctx context.Context, ingressClassList *networkingv1.IngressClassList) *Controller {
+func inits(ctx context.Context, ingressClassList *networkingv1.IngressClassList, loggingClients ...*Logging.Client) *Controller {
 
 	lbClient := getLoadBalancerClient()
 	wafClient := getWafClient()
@@ -286,7 +334,7 @@ func inits(ctx context.Context, ingressClassList *networkingv1.IngressClassList)
 	}
 
 	ingressClassInformer, saInformer, k8client := setUp(ctx, ingressClassList)
-	wrapperClient := client.NewWrapperClient(k8client, firewallClient, loadBalancerClient, nil, nil)
+	wrapperClient := client.NewWrapperClient(k8client, firewallClient, loadBalancerClient, nil, nil, loggingClients...)
 	mockClient := &client.ClientProvider{
 		K8sClient:           k8client,
 		DefaultConfigGetter: &MockConfigGetter{},
@@ -343,6 +391,77 @@ func (m MockWafClient) CreateWebAppFirewall(ctx context.Context, request waf.Cre
 
 func (m MockWafClient) DeleteWebAppFirewall(ctx context.Context, request waf.DeleteWebAppFirewallRequest) (waf.DeleteWebAppFirewallResponse, error) {
 	return waf.DeleteWebAppFirewallResponse{}, nil
+}
+
+type MockLoggingClient struct {
+	logs           map[string]map[string]*ocilogging.Log
+	createRequests []ocilogging.CreateLogRequest
+	updateRequests []ocilogging.UpdateLogRequest
+}
+
+func (m *MockLoggingClient) ensureLogs() {
+	if m.logs == nil {
+		m.logs = map[string]map[string]*ocilogging.Log{}
+	}
+}
+
+func (m *MockLoggingClient) CreateLog(ctx context.Context, request ocilogging.CreateLogRequest) (ocilogging.CreateLogResponse, error) {
+	m.ensureLogs()
+	m.createRequests = append(m.createRequests, request)
+	source := request.CreateLogDetails.Configuration.Source.(ocilogging.OciService)
+	logID := *source.Category + "-log"
+	if m.logs[*request.LogGroupId] == nil {
+		m.logs[*request.LogGroupId] = map[string]*ocilogging.Log{}
+	}
+	m.logs[*request.LogGroupId][logID] = &ocilogging.Log{
+		Id:         common.String(logID),
+		LogGroupId: request.LogGroupId,
+		IsEnabled:  request.CreateLogDetails.IsEnabled,
+		Configuration: &ocilogging.Configuration{
+			Source: source,
+		},
+	}
+	return ocilogging.CreateLogResponse{}, nil
+}
+
+func (m *MockLoggingClient) GetLog(ctx context.Context, request ocilogging.GetLogRequest) (ocilogging.GetLogResponse, error) {
+	m.ensureLogs()
+	if group := m.logs[*request.LogGroupId]; group != nil {
+		if log := group[*request.LogId]; log != nil {
+			return ocilogging.GetLogResponse{Log: *log, Etag: common.String("etag")}, nil
+		}
+	}
+	return ocilogging.GetLogResponse{}, &exception.NotFoundServiceError{}
+}
+
+func (m *MockLoggingClient) GetWorkRequest(ctx context.Context, request ocilogging.GetWorkRequestRequest) (ocilogging.GetWorkRequestResponse, error) {
+	return ocilogging.GetWorkRequestResponse{}, nil
+}
+
+func (m *MockLoggingClient) ListLogs(ctx context.Context, request ocilogging.ListLogsRequest) (ocilogging.ListLogsResponse, error) {
+	m.ensureLogs()
+	items := []ocilogging.LogSummary{}
+	for _, log := range m.logs[*request.LogGroupId] {
+		items = append(items, ocilogging.LogSummary{
+			Id:            log.Id,
+			LogGroupId:    log.LogGroupId,
+			IsEnabled:     log.IsEnabled,
+			Configuration: log.Configuration,
+			LogType:       ocilogging.LogSummaryLogTypeService,
+		})
+	}
+	return ocilogging.ListLogsResponse{Items: items}, nil
+}
+
+func (m *MockLoggingClient) UpdateLog(ctx context.Context, request ocilogging.UpdateLogRequest) (ocilogging.UpdateLogResponse, error) {
+	m.ensureLogs()
+	m.updateRequests = append(m.updateRequests, request)
+	if group := m.logs[*request.LogGroupId]; group != nil {
+		if log := group[*request.LogId]; log != nil {
+			log.IsEnabled = request.IsEnabled
+		}
+	}
+	return ocilogging.UpdateLogResponse{}, nil
 }
 
 type MockLoadBalancerClient struct {
