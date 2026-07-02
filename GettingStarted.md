@@ -520,7 +520,7 @@ kind: Ingress
 metadata:
   name: ingress-tls
   annotations:
-    oci-native-ingress.oraclecloud.com/certificate-ocid: ocid1.certificate.oc1.iad.amaaaaaah4gjgpyaxlby5qciob5wnwa7cnm4brvq2tfta3ls6ngch3s6gabc
+    oci-native-ingress.oraclecloud.com/certificate-ocid: ocid1.loggroup.oc1.iad.aaaaaaaauckenasusv5odnc4bqspi77hgnjeo6ydq33hidzadpkjxyzzz
 spec:
   rules:
   - host: "*.bar.com"
@@ -649,6 +649,22 @@ metadata:
  annotations:
    oci-native-ingress.oraclecloud.com/network-security-group-ids: ocid1.networksecuritygroup.oc1.abc,ocid1.networksecuritygroup.oc1.xyz
 ```
+
+### Load Balancer Logging Support
+Users can enable OCI Load Balancer access logs and error logs by adding one or both optional `IngressClass` resource annotations.
+The annotation value must be the OCID of an existing OCI Logging log group.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+ annotations:
+   oci-native-ingress.oraclecloud.com/access-log-group-ocid: ocid1.loggroup.oc1.abc
+   oci-native-ingress.oraclecloud.com/error-log-group-ocid: ocid1.loggroup.oc1.xyz
+```
+
+OCI Native Ingress Controller creates or reuses OCI service logs for the managed Load Balancer in the supplied log groups.
+Removing one of these annotations disables the corresponding controller-managed log.
 
 ### Tagging Support
 Users can use the following optional `IngressClass` resource annotations to apply defined and freeform tags to LBs managed by OCI NIC.

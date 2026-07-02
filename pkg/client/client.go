@@ -7,10 +7,12 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/certificatesmanagement"
 	"github.com/oracle/oci-go-sdk/v65/containerengine"
 	ociloadbalancer "github.com/oracle/oci-go-sdk/v65/loadbalancer"
+	ocilogging "github.com/oracle/oci-go-sdk/v65/logging"
 	ociwaf "github.com/oracle/oci-go-sdk/v65/waf"
 	"github.com/oracle/oci-native-ingress-controller/pkg/auth"
 	"github.com/oracle/oci-native-ingress-controller/pkg/certificate"
 	"github.com/oracle/oci-native-ingress-controller/pkg/loadbalancer"
+	"github.com/oracle/oci-native-ingress-controller/pkg/logging"
 	ociclient "github.com/oracle/oci-native-ingress-controller/pkg/oci/client"
 	"github.com/oracle/oci-native-ingress-controller/pkg/util"
 	"github.com/oracle/oci-native-ingress-controller/pkg/waf"
@@ -71,6 +73,7 @@ type WrapperClient struct {
 	kubernetesClient      kubernetes.Interface
 	wafClient             *waf.Client
 	lbClient              *loadbalancer.LoadBalancerClient
+	loggingClient         *logging.Client
 	certificatesClient    *certificate.CertificatesClient
 	containerEngineClient *containerengine.ContainerEngineClient
 }
@@ -100,6 +103,11 @@ func newWrapperClientFromConfig(configGetter auth.ConfigGetter, k8sClient kubern
 		return nil, err
 	}
 
+	ociLoggingClient, err := ocilogging.NewLoggingManagementClientWithConfigurationProvider(configProvider)
+	if err != nil {
+		return nil, err
+	}
+
 	containerEngineClient, err := containerengine.NewContainerEngineClientWithConfigurationProvider(configProvider)
 	if err != nil {
 		return nil, err
@@ -110,13 +118,18 @@ func newWrapperClientFromConfig(configGetter auth.ConfigGetter, k8sClient kubern
 		kubernetesClient:      k8sClient,
 		wafClient:             waf.New(&ociWafClient),
 		lbClient:              loadbalancer.New(&ociLBClient),
+		loggingClient:         logging.New(&ociLoggingClient),
 		certificatesClient:    certificate.New(&ociCertificatesMgmtClient, ociclient.NewCertificateClient(&ociCertificatesClient)),
 		containerEngineClient: &containerEngineClient,
 	}, nil
 }
 
-func NewWrapperClient(kubernetesClient kubernetes.Interface, wafClient *waf.Client, lbClient *loadbalancer.LoadBalancerClient, certificatesClient *certificate.CertificatesClient, containerEngineClient *containerengine.ContainerEngineClient) *WrapperClient {
-	return &WrapperClient{kubernetesClient: kubernetesClient, wafClient: wafClient, lbClient: lbClient, certificatesClient: certificatesClient, containerEngineClient: containerEngineClient}
+func NewWrapperClient(kubernetesClient kubernetes.Interface, wafClient *waf.Client, lbClient *loadbalancer.LoadBalancerClient, certificatesClient *certificate.CertificatesClient, containerEngineClient *containerengine.ContainerEngineClient, loggingClient ...*logging.Client) *WrapperClient {
+	var logClient *logging.Client
+	if len(loggingClient) > 0 {
+		logClient = loggingClient[0]
+	}
+	return &WrapperClient{kubernetesClient: kubernetesClient, wafClient: wafClient, lbClient: lbClient, loggingClient: logClient, certificatesClient: certificatesClient, containerEngineClient: containerEngineClient}
 }
 
 func (c *WrapperClient) GetK8Client() kubernetes.Interface {
@@ -129,6 +142,10 @@ func (c *WrapperClient) GetWafClient() *waf.Client {
 
 func (c *WrapperClient) GetLbClient() *loadbalancer.LoadBalancerClient {
 	return c.lbClient
+}
+
+func (c *WrapperClient) GetLoggingClient() *logging.Client {
+	return c.loggingClient
 }
 
 func (c *WrapperClient) GetCertClient() *certificate.CertificatesClient {

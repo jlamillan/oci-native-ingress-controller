@@ -76,6 +76,12 @@ const (
 	IngressClassDefinedTagsAnnotation             = "oci-native-ingress.oraclecloud.com/defined-tags"
 	IngressClassFreeformTagsAnnotation            = "oci-native-ingress.oraclecloud.com/freeform-tags"
 	IngressClassImplicitDefaultTagsAnnotation     = "oci-native-ingress.oraclecloud.com/implicit-default-tags"
+	IngressClassAccessLogGroupIdAnnotation        = "oci-native-ingress.oraclecloud.com/access-log-group-ocid"
+	IngressClassErrorLogGroupIdAnnotation         = "oci-native-ingress.oraclecloud.com/error-log-group-ocid"
+	IngressClassAccessLogIdAnnotation             = "oci-native-ingress.oraclecloud.com/access-log-ocid"
+	IngressClassErrorLogIdAnnotation              = "oci-native-ingress.oraclecloud.com/error-log-ocid"
+	IngressClassAccessLogAppliedGroupIdAnnotation = "oci-native-ingress.oraclecloud.com/access-log-applied-group-ocid"
+	IngressClassErrorLogAppliedGroupIdAnnotation  = "oci-native-ingress.oraclecloud.com/error-log-applied-group-ocid"
 
 	IngressHealthCheckProtocolAnnotation             = "oci-native-ingress.oraclecloud.com/healthcheck-protocol"
 	IngressHealthCheckPortAnnotation                 = "oci-native-ingress.oraclecloud.com/healthcheck-port"
@@ -98,6 +104,8 @@ const (
 	ProtocolHTTP                           = "HTTP"
 	ProtocolHTTP2                          = "HTTP2"
 	ProtocolHTTP2DefaultCipherSuite        = "oci-default-http2-ssl-cipher-suite-v1"
+	LoadBalancerAccessLogCategory          = "access"
+	LoadBalancerErrorLogCategory           = "error"
 	DefaultBackendSetName                  = "default_ingress"
 	DefaultHealthCheckProtocol             = ProtocolTCP
 	DefaultHealthCheckPort                 = 0
@@ -284,6 +292,21 @@ func GetIngressClassFreeformTags(ic *networkingv1.IngressClass) (map[string]stri
 	}
 
 	return freeformTags, nil
+}
+
+func GetIngressClassAccessLogGroupId(ic *networkingv1.IngressClass) string {
+	return getTrimmedIngressClassAnnotation(ic, IngressClassAccessLogGroupIdAnnotation)
+}
+
+func GetIngressClassErrorLogGroupId(ic *networkingv1.IngressClass) string {
+	return getTrimmedIngressClassAnnotation(ic, IngressClassErrorLogGroupIdAnnotation)
+}
+
+func getTrimmedIngressClassAnnotation(ic *networkingv1.IngressClass, annotation string) string {
+	if ic == nil || ic.Annotations == nil {
+		return ""
+	}
+	return strings.TrimSpace(ic.Annotations[annotation])
 }
 
 func GetIngressProtocol(i *networkingv1.Ingress) string {

@@ -285,6 +285,15 @@ func (c *Controller) ensureLoadBalancer(ctx context.Context, ic *networkingv1.In
 		}
 	}
 
+	if wrapperClient.GetLoggingClient() != nil {
+		err = wrapperClient.GetLoggingClient().EnsureLoadBalancerLogs(ctx, wrapperClient.GetK8Client(), ic, *lb.Id)
+		if err != nil {
+			return err
+		}
+	} else if util.GetIngressClassAccessLogGroupId(ic) != "" || util.GetIngressClassErrorLogGroupId(ic) != "" {
+		return fmt.Errorf("logging client not found in the context")
+	}
+
 	klog.V(4).InfoS("checking if updates are required for load balancer", "ingressClass", klog.KObj(ic))
 	return nil
 }
