@@ -710,6 +710,22 @@ spec:
 
 The annotation must reference a reserved private IPv4 address. Ephemeral private IP addresses, IPv6 addresses, and public load balancers are not supported. The reserved public and private IP settings cannot be changed after the load balancer is created.
 
+### Load Balancer Logging Support
+Users can enable OCI Load Balancer access logs and error logs by adding one or both optional `IngressClass` resource annotations.
+The annotation value must be the OCID of an existing OCI Logging log group.
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  annotations:
+    oci-native-ingress.oraclecloud.com/access-log-group-ocid: ocid1.loggroup.oc1.abc
+    oci-native-ingress.oraclecloud.com/error-log-group-ocid: ocid1.loggroup.oc1.xyz
+```
+
+OCI Native Ingress Controller creates or reuses OCI service logs for the managed Load Balancer in the supplied log groups.
+Removing one of these annotations disables the corresponding controller-managed log.
+
 ### Tagging Support
 Users can use the following optional `IngressClass` resource annotations to apply defined and freeform tags to LBs managed by OCI NIC.
 The JSON strings should be wrapped in single quotes. They default to `'{}'` if not specified or empty.
