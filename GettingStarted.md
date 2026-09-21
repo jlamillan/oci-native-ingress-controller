@@ -467,11 +467,8 @@ We can configure HTTPS-enabled ingress routes using Kubernetes TLS secrets, OCI 
 - The controller will appropriately configure both listener and backend sets with provided credentials.
 - In the case of Kubernetes secret we create a certificate service certificate and a ca bundle to configure the listener and backend set appropriately.
 - In the case of direct OCI certificates we use `oci-native-ingress.oraclecloud.com/certificate-ocid` to configure listener SSL termination.
-- `oci-native-ingress.oraclecloud.com/certificate-ocid` accepts a comma-separated list so multiple certificates can be attached to one listener.
-- Multiple `spec.tls` secrets that map to one listener are aggregated into one listener SSL configuration.
 - Customer can use the same credentials in their pods to make this an end to end SSL support.
 - If the customer wishes to terminate TLS on the LB and run plain text (HTTP) backend, they can use the annotation `oci-native-ingress.oraclecloud.com/backend-tls-enabled: "false"` on the Ingress
-- In tenancies or regions where OCI LB multi-certificate listeners are not enabled, NIC surfaces an actionable reconcile error and warning event and does not fall back to a multi-listener workaround.
 
 ##### TLS policy annotations
 NIC supports optional ingress annotations for the OCI Load Balancer listener and backend-set TLS policy:
@@ -554,14 +551,14 @@ spec:
 ```
 
 ##### Sample configuration : Using Certificate
-Certificate should have the common name of the host specified. For multi-certificate listeners, provide a comma-separated list.
+Certificate should have the common name of the host specified.
 ```
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: ingress-tls
   annotations:
-    oci-native-ingress.oraclecloud.com/certificate-ocid: ocid1.certificate.oc1.iad.<cert-a>,ocid1.certificate.oc1.iad.<cert-b>
+    oci-native-ingress.oraclecloud.com/certificate-ocid: ocid1.certificate.oc1.iad.<certificate-ocid>
 spec:
   rules:
   - host: "*.bar.com"
@@ -794,7 +791,7 @@ All changes to those modules should be reflected in the remote VCS repository.
 
 ### Known Issues
 1. The loadbalancer has a limitation of 16 backend sets per load balancer. We create a backend set for every unique service and port combination. So if a customer has more such services they need to have new load balancers.
-2. Each service port is mapped to one load balancer listener. Listener SSL configuration can include multiple certificates (from multiple `spec.tls` secrets and/or comma-separated direct certificate OCIDs). In this feature path, HTTP, HTTP/2, and gRPC multi-certificate listeners use `oci-tls-12-13-ssl-cipher-suite-v3` with `TLSv1.2` and `TLSv1.3`. In tenancies or regions where OCI LB multi-certificate listener capability is not enabled, multi-certificate requests are rejected by OCI LB and surfaced by NIC as actionable reconcile errors and warning events.
+2. Each service port is mapped to one load balancer listener.
 3. Any conflicting declarations for same backend set health checker and routing policy across ingress resources will throw a validation error which will be logged in controller logs.
 4. For supporting ssl through kubernetes secrets, we generate respective certificates and ca bundles in certificate service. If we delete ingress resource, currently we only delete the load balancer resources.
 The certificates need to be cleared by the customer.
