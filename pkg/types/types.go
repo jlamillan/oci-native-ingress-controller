@@ -45,6 +45,7 @@ type IngressOpts struct {
 	MaxNodeBackendsPerBackendSet    int
 	BackendRepairOnly               bool
 	BackendRepairApply              bool
+	BackendRepairThenNormal         bool
 }
 
 func MapToPrincipalType(authType string) (OCIPrincipalType, error) {

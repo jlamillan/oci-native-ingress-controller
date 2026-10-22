@@ -40,12 +40,12 @@ type backendRepairPlan struct {
 }
 
 // RunRepair makes one bounded pass over load balancers referenced by managed IngressClasses.
-// Without apply, it only logs the plan. Normal controllers are not started in this mode.
-func (c *Controller) RunRepair(ctx context.Context, apply bool) {
+// Without apply, it only logs the plan. A failed apply must not be followed by normal reconciliation.
+func (c *Controller) RunRepair(ctx context.Context, apply bool) error {
 	classes, err := c.ingressClassLister.List(labels.Everything())
 	if err != nil {
 		klog.ErrorS(err, "Backend repair could not list ingress classes")
-		return
+		return err
 	}
 	targets := make([]repairTarget, 0, len(classes))
 	seen := map[string]bool{}
@@ -61,19 +61,20 @@ func (c *Controller) RunRepair(ctx context.Context, apply bool) {
 		clientCtx, err := client.GetClientContext(class, c.saLister, c.client, "", class.Name)
 		if err != nil {
 			klog.ErrorS(err, "Backend repair could not create OCI client", "ingressClass", class.Name)
-			return
+			return err
 		}
 		wrapper, ok := clientCtx.Value(util.WrapperClient).(*client.WrapperClient)
 		if !ok {
-			klog.ErrorS(fmt.Errorf("OCI client missing"), "Backend repair stopped", "ingressClass", class.Name)
-			return
+			err := fmt.Errorf("OCI client missing for ingress class %s", class.Name)
+			klog.ErrorS(err, "Backend repair stopped")
+			return err
 		}
 		priority := 0
 		health, err := wrapper.GetLbClient().GetLoadBalancerHealth(ctx, lbID)
 		if err != nil {
 			if util.IsServiceError(err, 429) {
 				klog.ErrorS(err, "Backend repair stopped after OCI rate limit", "lbID", lbID)
-				return
+				return err
 			}
 			klog.ErrorS(err, "Backend repair could not read LB health; using normal priority", "lbID", lbID)
 		} else {
@@ -82,7 +83,7 @@ func (c *Controller) RunRepair(ctx context.Context, apply bool) {
 		targets = append(targets, repairTarget{class: class, lbID: lbID, wrapper: wrapper, priority: priority})
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
@@ -95,23 +96,24 @@ func (c *Controller) RunRepair(ctx context.Context, apply bool) {
 	})
 	for _, target := range targets {
 		if ctx.Err() != nil {
-			return
+			return ctx.Err()
 		}
 		if err := c.repairLoadBalancer(ctx, target, apply); err != nil {
 			if apply || util.IsServiceError(err, 429) {
 				klog.ErrorS(err, "Backend repair stopped", "lbID", target.lbID)
-				return // Do not fan out after an OCI mutation error, especially a tenant 429.
+				return err // Do not fan out after an OCI mutation error, especially a tenant 429.
 			}
 			klog.ErrorS(err, "Backend repair could not plan LB; continuing inventory", "lbID", target.lbID)
 			continue
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-time.After(time.Second):
 		}
 	}
 	klog.InfoS("Backend repair pass completed", "loadBalancers", len(targets), "apply", apply)
+	return nil
 }
 
 func (c *Controller) repairLoadBalancer(ctx context.Context, target repairTarget, apply bool) error {

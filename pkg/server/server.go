@@ -66,7 +66,7 @@ func BuildConfig(kubeconfig string) (*rest.Config, error) {
 func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginformers.IngressClassInformer,
 	ingressInformer networkinginformers.IngressInformer, k8client kubernetes.Interface, serviceInformer v1.ServiceInformer, secretInformer v1.SecretInformer,
 	endpointInformer v1.EndpointsInformer, podInformer v1.PodInformer, nodeInformer v1.NodeInformer, serviceAccountInformer v1.ServiceAccountInformer,
-	c ctrcache.Cache, reg *prometheus.Registry, eventRecorder events.EventRecorder, repairDone chan<- struct{}) func(ctx context.Context) {
+	c ctrcache.Cache, reg *prometheus.Registry, eventRecorder events.EventRecorder, repairDone chan<- error) func(ctx context.Context) {
 	return func(ctx context.Context) {
 		klog.Info("Controller loop...")
 
@@ -92,7 +92,7 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 		if cni == string(containerengine.ClusterPodNetworkOptionDetailsCniTypeFlannelOverlay) {
 			initialBackendNodeLister = nodeInformer.Lister()
 		}
-		if !opts.BackendRepairOnly {
+		startNormalControllers := func() {
 			ingressController := ingress.NewController(
 				opts.ControllerClass,
 				opts.CompartmentId,
@@ -136,6 +136,19 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 			go ingressClassController.Run(opts.NumWorkers, ctx.Done())
 			go ingressController.Run(opts.NumWorkers, ctx.Done())
 			go routingPolicyController.Run(opts.NumWorkers, ctx.Done())
+			if opts.CertDeletionGracePeriodInDays > 0 {
+				certificateCleanUpTask := certificatecleanup.NewTask(
+					opts.ControllerClass,
+					ingressClassInformer,
+					serviceAccountInformer,
+					opts.UseLbCompartmentForCertificates,
+					opts.CompartmentId,
+					time.Duration(opts.CertDeletionGracePeriodInDays)*(24*time.Hour),
+					client,
+					c,
+				)
+				go certificateCleanUpTask.Run(ctx.Done())
+			}
 		}
 
 		klog.Infof("CNI Type of given cluster : %s", cni)
@@ -157,13 +170,18 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 			)
 			if opts.BackendRepairOnly {
 				go func() {
-					defer close(repairDone)
-					backendController.RunRepair(ctx, opts.BackendRepairApply)
+					runBackendRepair(ctx, opts.BackendRepairApply, opts.BackendRepairThenNormal,
+						backendController.RunRepair, func() {
+							startNormalControllers()
+							go backendController.Run(opts.NumWorkers, ctx.Done())
+						}, repairDone, 10*time.Minute)
 				}()
 			} else {
+				startNormalControllers()
 				go backendController.Run(opts.NumWorkers, ctx.Done())
 			}
 		} else {
+			startNormalControllers()
 			backendController := backend.NewController(
 				opts.ControllerClass,
 				ingressClassInformer,
@@ -179,26 +197,37 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 			go backendController.Run(opts.NumWorkers, ctx.Done())
 		}
 
-		if !opts.BackendRepairOnly && opts.CertDeletionGracePeriodInDays > 0 {
-			certificateCleanUpTask := certificatecleanup.NewTask(
-				opts.ControllerClass,
-				ingressClassInformer,
-				serviceAccountInformer,
-				opts.UseLbCompartmentForCertificates,
-				opts.CompartmentId,
-				time.Duration(opts.CertDeletionGracePeriodInDays)*(24*time.Hour),
-				client,
-				c,
-			)
-			go certificateCleanUpTask.Run(ctx.Done())
-		}
-
 		// Mark controllers as ready for health checks
 		go func() {
 			time.Sleep(2 * time.Second) // Give controllers a moment to start
 			GetHealthChecker().SetControllersReady(true)
 			klog.Info("Controllers marked as ready for health checks")
 		}()
+	}
+}
+
+func runBackendRepair(ctx context.Context, apply, thenNormal bool, repair func(context.Context, bool) error,
+	startNormal func(), done chan<- error, retryDelay time.Duration) {
+	for {
+		err := repair(ctx, apply)
+		if ctx.Err() != nil {
+			return
+		}
+		if !thenNormal {
+			done <- err
+			return
+		}
+		if err == nil {
+			klog.Info("Backend repair completed; starting normal controllers")
+			startNormal()
+			return
+		}
+		klog.ErrorS(err, "Backend repair failed; retrying before normal controllers start", "retryAfter", retryDelay)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryDelay):
+		}
 	}
 }
 

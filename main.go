@@ -71,6 +71,8 @@ func main() {
 		"run one backend repair pass for managed load balancers without starting other load balancer controllers")
 	flag.BoolVar(&opts.BackendRepairApply, "backend-repair-apply", false,
 		"apply the backend repair plan (otherwise log the plan without OCI mutations)")
+	flag.BoolVar(&opts.BackendRepairThenNormal, "backend-repair-then-normal", false,
+		"after a successful applied repair pass, start normal controllers instead of exiting")
 
 	var logFile string
 	flag.StringVar(&logFile, "log-file", "", "absolute path to the file where application logs will be stored")
@@ -130,6 +132,9 @@ func main() {
 	}
 	if opts.BackendRepairApply && !opts.BackendRepairOnly {
 		klog.Fatal("backend-repair-apply requires backend-repair-only")
+	}
+	if opts.BackendRepairThenNormal && (!opts.BackendRepairOnly || !opts.BackendRepairApply) {
+		klog.Fatal("backend-repair-then-normal requires backend-repair-only and backend-repair-apply")
 	}
 
 	// leader election uses the Kubernetes API by writing to a
@@ -198,20 +203,22 @@ func main() {
 		eventRecorder = eventBroadcaster.NewRecorder(scheme.Scheme, opts.ControllerClass)
 	}
 
-	if !opts.BackendRepairOnly {
+	if !opts.BackendRepairOnly || opts.BackendRepairThenNormal {
 		server.SetupWebhookServer(ingressInformer, serviceInformer, client, ctx)
 	}
 	mux := http.NewServeMux()
 	reg, err := server.SetupMetricsServer(opts.MetricsBackend, opts.MetricsPort, mux, ctx)
 
-	repairDone := make(chan struct{})
+	repairDone := make(chan error, 1)
 	run := server.SetUpControllers(opts, ingressClassInformer, ingressInformer, client, serviceInformer, secretInformer, endpointInformer, podInformer, nodeInformer, serviceAccountInformer, c, reg, eventRecorder, repairDone)
 
 	metric.ServeMetrics(opts.MetricsPort, mux)
 	if opts.BackendRepairOnly && !opts.BackendRepairApply {
 		// Inventory mode must not displace the deployed controller's leader lease.
 		run(ctx)
-		<-repairDone
+		if err := <-repairDone; err != nil {
+			klog.ErrorS(err, "Backend repair inventory failed")
+		}
 		return
 	}
 	// we use the Lease lock type since edits to Leases are less common
@@ -246,8 +253,14 @@ func main() {
 				// usually put your code
 				run(ctx)
 				if opts.BackendRepairOnly {
-					<-repairDone
-					cancel() // Release the lease as soon as the bounded repair pass ends.
+					if opts.BackendRepairThenNormal {
+						<-ctx.Done() // Keep the lease while normal controllers run after repair.
+					} else {
+						if err := <-repairDone; err != nil {
+							klog.ErrorS(err, "Backend repair pass failed")
+						}
+						cancel() // Release the lease as soon as the bounded repair pass ends.
+					}
 				}
 			},
 			OnStoppedLeading: func() {

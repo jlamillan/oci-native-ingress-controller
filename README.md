@@ -32,6 +32,15 @@ Apply mode uses the configured leader lease so it cannot race the deployed
 controller; keep the same lease name and namespace as the normal deployment.
 The process releases the lease and exits when its repair pass finishes.
 
+For a long-running deployment, add `--backend-repair-then-normal` alongside
+`--backend-repair-only --backend-repair-apply`. The leader repairs the managed
+load balancers in health-priority order, then starts the normal controllers in
+the same process. Normal node-port reconciliation uses
+`--max-node-backends-per-backend-set` when set. If a repair pass fails, it
+waits ten minutes and retries; normal reconciliation does not start until a
+full pass succeeds. A replacement leader repeats the repair phase before
+starting normal reconciliation.
+
 ## Contributing
 
 This project welcomes contributions from the community. Before submitting a pull
