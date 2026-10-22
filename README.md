@@ -10,6 +10,28 @@ on the existing OCI load balancer features to act as an ingress controller for c
 ## Getting Started
 Please have a look at [Getting Started](./GettingStarted.md)
 
+## Backend repair
+
+For over-limit OCI load balancers, `--backend-repair-only` runs one repair pass
+over load balancers discovered from managed IngressClasses, without the ingress,
+ingress-class, routing-policy, or certificate-cleanup controllers. The default
+makes no OCI or leader-lease mutations: the controller logs each planned stale
+registration and the projected LB-wide backend count. Add
+`--backend-repair-apply` only after reviewing that plan.
+
+Repair processes `default_ingress`-critical LBs first, then LBs with another
+critical set, then warning and healthy LBs. For each LB it deletes registrations
+in managed node-port sets only when their IP is absent from all Kubernetes
+nodes. It preserves the final registration in each regular set. After cleanup,
+it updates `default_ingress` only if both the current and projected LB-wide
+counts fit OCI's 512-backend limit. A 429 or other OCI error stops the pass;
+rerun it after inspecting the log and current LB state. This mode does not add
+regular backends. Run a normal reconciliation after the repair and health check.
+LBs without stale registrations or a critical default set are skipped.
+Apply mode uses the configured leader lease so it cannot race the deployed
+controller; keep the same lease name and namespace as the normal deployment.
+The process releases the lease and exits when its repair pass finishes.
+
 ## Contributing
 
 This project welcomes contributions from the community. Before submitting a pull

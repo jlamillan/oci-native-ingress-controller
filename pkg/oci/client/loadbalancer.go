@@ -93,6 +93,11 @@ func (client LBClient) GetBackendSetHealth(ctx context.Context,
 	return client.lbClient.GetBackendSetHealth(ctx, request)
 }
 
+func (client LBClient) GetLoadBalancerHealth(ctx context.Context,
+	request loadbalancer.GetLoadBalancerHealthRequest) (loadbalancer.GetLoadBalancerHealthResponse, error) {
+	return client.lbClient.GetLoadBalancerHealth(ctx, request)
+}
+
 func (client LBClient) CreateRoutingPolicy(ctx context.Context,
 	request loadbalancer.CreateRoutingPolicyRequest) (loadbalancer.CreateRoutingPolicyResponse, error) {
 	return client.lbClient.CreateRoutingPolicy(ctx, request)

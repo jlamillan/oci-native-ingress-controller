@@ -302,6 +302,25 @@ func TestLoadBalancerClient_UpdateBackends_PreservesBackendSetTLSPolicy(t *testi
 	Expect(sslConfig.Protocols).To(Equal([]string{"TLSv1.2"}))
 }
 
+func TestDeleteBackendIfPresentPreservesLastBackend(t *testing.T) {
+	setName := util.GenerateBackendSetName("default", "testecho1", 80)
+	backend := func(ip string) ociloadbalancer.Backend {
+		return ociloadbalancer.Backend{IpAddress: common.String(ip), Port: common.Int(80)}
+	}
+	client := &recordingBackendClient{backends: []ociloadbalancer.Backend{backend("10.0.0.1")}}
+	lbc := &LoadBalancerClient{LbClient: client, Cache: map[string]*LbCacheObj{}}
+	if deleted, err := lbc.DeleteBackendIfPresent(context.Background(), "id", setName, "10.0.0.1:80"); err == nil || deleted || len(client.calls) != 0 {
+		t.Fatalf("last backend was not preserved: deleted=%v err=%v calls=%v", deleted, err, client.calls)
+	}
+	client.backends = append(client.backends, backend("10.0.0.2"))
+	if deleted, err := lbc.DeleteBackendIfPresent(context.Background(), "id", setName, "10.0.0.2:80"); err != nil || !deleted {
+		t.Fatalf("stale backend was not deleted: deleted=%v err=%v", deleted, err)
+	}
+	if len(client.calls) != 1 || client.calls[0] != "delete:10.0.0.2:80" {
+		t.Fatalf("unexpected OCI mutations: %v", client.calls)
+	}
+}
+
 func TestLoadBalancerClient_UpdateBackendSetDetails(t *testing.T) {
 	RegisterTestingT(t)
 	loadBalancerClient := setupLBClient()

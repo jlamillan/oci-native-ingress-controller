@@ -63,6 +63,14 @@ func main() {
 	flag.BoolVar(&opts.EmitEvents, "emit-events", false, "emit kubernetes events for Ingress/IngressClass errors observed during reconciliation")
 	flag.Int64Var(&opts.CertDeletionGracePeriodInDays, "cert-deletion-grace-period-in-days", 0,
 		"number of days before an unused oci certificate service resource is deleted, if non-positive this cleanup is disabled")
+	flag.IntVar(&opts.NumWorkers, "num-workers", types.DefaultNumWorkers,
+		"number of workers to run for each controller workqueue")
+	flag.IntVar(&opts.MaxNodeBackendsPerBackendSet, "max-node-backends-per-backend-set", 0,
+		"maximum number of node backends for a Cluster traffic policy Service (0 means unlimited)")
+	flag.BoolVar(&opts.BackendRepairOnly, "backend-repair-only", false,
+		"run one backend repair pass for managed load balancers without starting other load balancer controllers")
+	flag.BoolVar(&opts.BackendRepairApply, "backend-repair-apply", false,
+		"apply the backend repair plan (otherwise log the plan without OCI mutations)")
 
 	var logFile string
 	flag.StringVar(&logFile, "log-file", "", "absolute path to the file where application logs will be stored")
@@ -113,6 +121,15 @@ func main() {
 
 	if opts.UseLbCompartmentForCertificates {
 		klog.Info("use-lb-compartment-for-certificates flag set to true, will use LB compartment for certificate management")
+	}
+	if opts.NumWorkers <= 0 {
+		klog.Fatal("num-workers must be greater than zero")
+	}
+	if opts.MaxNodeBackendsPerBackendSet < 0 {
+		klog.Fatal("max-node-backends-per-backend-set must not be negative")
+	}
+	if opts.BackendRepairApply && !opts.BackendRepairOnly {
+		klog.Fatal("backend-repair-apply requires backend-repair-only")
 	}
 
 	// leader election uses the Kubernetes API by writing to a
@@ -181,13 +198,22 @@ func main() {
 		eventRecorder = eventBroadcaster.NewRecorder(scheme.Scheme, opts.ControllerClass)
 	}
 
-	server.SetupWebhookServer(ingressInformer, serviceInformer, client, ctx)
+	if !opts.BackendRepairOnly {
+		server.SetupWebhookServer(ingressInformer, serviceInformer, client, ctx)
+	}
 	mux := http.NewServeMux()
 	reg, err := server.SetupMetricsServer(opts.MetricsBackend, opts.MetricsPort, mux, ctx)
 
-	run := server.SetUpControllers(opts, ingressClassInformer, ingressInformer, client, serviceInformer, secretInformer, endpointInformer, podInformer, nodeInformer, serviceAccountInformer, c, reg, eventRecorder)
+	repairDone := make(chan struct{})
+	run := server.SetUpControllers(opts, ingressClassInformer, ingressInformer, client, serviceInformer, secretInformer, endpointInformer, podInformer, nodeInformer, serviceAccountInformer, c, reg, eventRecorder, repairDone)
 
 	metric.ServeMetrics(opts.MetricsPort, mux)
+	if opts.BackendRepairOnly && !opts.BackendRepairApply {
+		// Inventory mode must not displace the deployed controller's leader lease.
+		run(ctx)
+		<-repairDone
+		return
+	}
 	// we use the Lease lock type since edits to Leases are less common
 	// and fewer objects in the cluster watch "all Leases".
 	lock := &resourcelock.LeaseLock{
@@ -219,6 +245,10 @@ func main() {
 				// we're notified when we start - this is where you would
 				// usually put your code
 				run(ctx)
+				if opts.BackendRepairOnly {
+					<-repairDone
+					cancel() // Release the lease as soon as the bounded repair pass ends.
+				}
 			},
 			OnStoppedLeading: func() {
 				klog.Infof("leader lost: %s", opts.LeaseID)

@@ -66,7 +66,7 @@ func BuildConfig(kubeconfig string) (*rest.Config, error) {
 func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginformers.IngressClassInformer,
 	ingressInformer networkinginformers.IngressInformer, k8client kubernetes.Interface, serviceInformer v1.ServiceInformer, secretInformer v1.SecretInformer,
 	endpointInformer v1.EndpointsInformer, podInformer v1.PodInformer, nodeInformer v1.NodeInformer, serviceAccountInformer v1.ServiceAccountInformer,
-	c ctrcache.Cache, reg *prometheus.Registry, eventRecorder events.EventRecorder) func(ctx context.Context) {
+	c ctrcache.Cache, reg *prometheus.Registry, eventRecorder events.EventRecorder, repairDone chan<- struct{}) func(ctx context.Context) {
 	return func(ctx context.Context) {
 		klog.Info("Controller loop...")
 
@@ -82,52 +82,61 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 			klog.Fatalf("failed to get cluster details: %v", err)
 		}
 		metricsCollector := metric.NewIngressCollector(opts.ControllerClass, reg)
+		if opts.BackendRepairOnly && cni != string(containerengine.ClusterPodNetworkOptionDetailsCniTypeFlannelOverlay) {
+			klog.Fatalf("backend-repair-only requires FLANNEL_OVERLAY CNI, got %s", cni)
+		}
+		if opts.BackendRepairOnly {
+			klog.InfoS("Backend repair mode enabled; other load balancer controllers are disabled", "apply", opts.BackendRepairApply)
+		}
 		var initialBackendNodeLister corelisters.NodeLister
 		if cni == string(containerengine.ClusterPodNetworkOptionDetailsCniTypeFlannelOverlay) {
 			initialBackendNodeLister = nodeInformer.Lister()
 		}
-		ingressController := ingress.NewController(
-			opts.ControllerClass,
-			opts.CompartmentId,
-			ingressClassInformer,
-			ingressInformer,
-			serviceAccountInformer,
-			serviceInformer.Lister(),
-			endpointInformer.Lister(),
-			podInformer.Lister(),
-			initialBackendNodeLister,
-			secretInformer,
-			client,
-			metricsCollector,
-			c,
-			opts.UseLbCompartmentForCertificates,
-			eventRecorder,
-		)
+		if !opts.BackendRepairOnly {
+			ingressController := ingress.NewController(
+				opts.ControllerClass,
+				opts.CompartmentId,
+				ingressClassInformer,
+				ingressInformer,
+				serviceAccountInformer,
+				serviceInformer.Lister(),
+				endpointInformer.Lister(),
+				podInformer.Lister(),
+				initialBackendNodeLister,
+				secretInformer,
+				client,
+				metricsCollector,
+				c,
+				opts.UseLbCompartmentForCertificates,
+				eventRecorder,
+				opts.MaxNodeBackendsPerBackendSet,
+			)
 
-		routingPolicyController := routingpolicy.NewController(
-			opts.ControllerClass,
-			ingressClassInformer,
-			ingressInformer,
-			serviceAccountInformer,
-			serviceInformer.Lister(),
-			client,
-			eventRecorder,
-		)
+			routingPolicyController := routingpolicy.NewController(
+				opts.ControllerClass,
+				ingressClassInformer,
+				ingressInformer,
+				serviceAccountInformer,
+				serviceInformer.Lister(),
+				client,
+				eventRecorder,
+			)
 
-		ingressClassController := ingressclass.NewController(
-			opts.CompartmentId,
-			opts.SubnetId,
-			opts.ControllerClass,
-			ingressClassInformer,
-			serviceAccountInformer,
-			client,
-			c,
-			eventRecorder,
-		)
+			ingressClassController := ingressclass.NewController(
+				opts.CompartmentId,
+				opts.SubnetId,
+				opts.ControllerClass,
+				ingressClassInformer,
+				serviceAccountInformer,
+				client,
+				c,
+				eventRecorder,
+			)
 
-		go ingressClassController.Run(3, ctx.Done())
-		go ingressController.Run(3, ctx.Done())
-		go routingPolicyController.Run(3, ctx.Done())
+			go ingressClassController.Run(opts.NumWorkers, ctx.Done())
+			go ingressController.Run(opts.NumWorkers, ctx.Done())
+			go routingPolicyController.Run(opts.NumWorkers, ctx.Done())
+		}
 
 		klog.Infof("CNI Type of given cluster : %s", cni)
 		if cni == string(containerengine.ClusterPodNetworkOptionDetailsCniTypeFlannelOverlay) {
@@ -144,8 +153,16 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 				client,
 				metricsCollector,
 				eventRecorder,
+				opts.MaxNodeBackendsPerBackendSet,
 			)
-			go backendController.Run(3, ctx.Done())
+			if opts.BackendRepairOnly {
+				go func() {
+					defer close(repairDone)
+					backendController.RunRepair(ctx, opts.BackendRepairApply)
+				}()
+			} else {
+				go backendController.Run(opts.NumWorkers, ctx.Done())
+			}
 		} else {
 			backendController := backend.NewController(
 				opts.ControllerClass,
@@ -159,10 +176,10 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 				metricsCollector,
 				eventRecorder,
 			)
-			go backendController.Run(3, ctx.Done())
+			go backendController.Run(opts.NumWorkers, ctx.Done())
 		}
 
-		if opts.CertDeletionGracePeriodInDays > 0 {
+		if !opts.BackendRepairOnly && opts.CertDeletionGracePeriodInDays > 0 {
 			certificateCleanUpTask := certificatecleanup.NewTask(
 				opts.ControllerClass,
 				ingressClassInformer,

@@ -103,6 +103,21 @@ func (lbc *LoadBalancerClient) GetBackendSetHealth(ctx context.Context, lbID str
 	return &resp.BackendSetHealth, nil
 }
 
+// GetLoadBalancerHealth is optional on test clients; production clients expose it.
+func (lbc *LoadBalancerClient) GetLoadBalancerHealth(ctx context.Context, lbID string) (*loadbalancer.LoadBalancerHealth, error) {
+	provider, ok := lbc.LbClient.(interface {
+		GetLoadBalancerHealth(context.Context, loadbalancer.GetLoadBalancerHealthRequest) (loadbalancer.GetLoadBalancerHealthResponse, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("load balancer health API is unavailable")
+	}
+	resp, err := provider.GetLoadBalancerHealth(ctx, loadbalancer.GetLoadBalancerHealthRequest{LoadBalancerId: common.String(lbID)})
+	if err != nil {
+		return nil, err
+	}
+	return &resp.LoadBalancerHealth, nil
+}
+
 func (lbc *LoadBalancerClient) UpdateNetworkSecurityGroups(ctx context.Context, lbId string, nsgIds []string) (loadbalancer.UpdateNetworkSecurityGroupsResponse, error) {
 	_, etag, err := lbc.GetLoadBalancer(ctx, lbId)
 	if err != nil {
@@ -622,6 +637,51 @@ func (lbc *LoadBalancerClient) UpdateBackends(ctx context.Context, lbID string, 
 
 	return lbc.UpdateBackendSet(ctx, lbID, etag, *backendSet.Name, policy, healthCheckerDetails, sslConfig, backends,
 		backendSet.SessionPersistenceConfiguration, backendSet.LbCookieSessionPersistenceConfiguration)
+}
+
+// DeleteBackendIfPresent removes one registration without rewriting its backend set.
+// This remains usable when the load balancer is already above the total backend limit.
+func (lbc *LoadBalancerClient) DeleteBackendIfPresent(ctx context.Context, lbID, backendSetName, backendName string) (bool, error) {
+	unlock := lbc.mutationLocks.lock(lbID)
+	defer unlock()
+
+	lb, etag, err := lbc.RefreshLoadBalancer(ctx, lbID)
+	if err != nil {
+		return false, err
+	}
+	backendSet, ok := lb.BackendSets[backendSetName]
+	if !ok {
+		return false, fmt.Errorf("backend set %s disappeared from load balancer %s", backendSetName, lbID)
+	}
+	found := false
+	for _, backend := range backendSet.Backends {
+		if backend.IpAddress != nil && backend.Port != nil && fmt.Sprintf("%s:%d", *backend.IpAddress, *backend.Port) == backendName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	if len(backendSet.Backends) <= 1 {
+		return false, fmt.Errorf("refusing to remove last backend from %s/%s", lbID, backendSetName)
+	}
+	resp, err := lbc.LbClient.DeleteBackend(ctx, loadbalancer.DeleteBackendRequest{
+		LoadBalancerId: common.String(lbID),
+		BackendSetName: common.String(backendSetName),
+		BackendName:    common.String(backendName),
+		IfMatch:        common.String(etag),
+	})
+	if err != nil {
+		return false, err
+	}
+	if resp.OpcWorkRequestId == nil {
+		return false, fmt.Errorf("delete backend %s/%s returned no work request ID", backendSetName, backendName)
+	}
+	if _, err := lbc.waitForWorkRequest(ctx, *resp.OpcWorkRequestId); err != nil {
+		return false, fmt.Errorf("delete backend %s/%s: %w", backendSetName, backendName, err)
+	}
+	return true, nil
 }
 
 // UpdateBackendSetDetails updates sslConfig, policy, healthChecker, and session persistence configs while preserving existing backends
