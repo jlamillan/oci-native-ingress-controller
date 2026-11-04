@@ -72,7 +72,7 @@ func main() {
 	flag.BoolVar(&opts.BackendRepairApply, "backend-repair-apply", false,
 		"apply the backend repair plan (otherwise log the plan without OCI mutations)")
 	flag.BoolVar(&opts.BackendRepairThenNormal, "backend-repair-then-normal", false,
-		"after a successful applied repair pass, start normal controllers instead of exiting")
+		"start normal controllers after a bounded applied repair pass, even if repair is incomplete")
 
 	var logFile string
 	flag.StringVar(&logFile, "log-file", "", "absolute path to the file where application logs will be stored")

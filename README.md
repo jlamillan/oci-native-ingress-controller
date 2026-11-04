@@ -23,8 +23,7 @@ Repair processes `default_ingress`-critical LBs first, then LBs with another
 critical set, then warning and healthy LBs. For each LB it deletes registrations
 in managed node-port sets only when their IP is absent from all Kubernetes
 nodes. It preserves the final registration in each regular set. After cleanup,
-it updates `default_ingress` only if both the current and projected LB-wide
-counts fit OCI's 512-backend limit. A 429 or other OCI error stops the pass;
+it updates `default_ingress`; OCI validates the LB-wide backend limit. A 429 or other OCI error stops the pass;
 rerun it after inspecting the log and current LB state. This mode does not add
 regular backends. Run a normal reconciliation after the repair and health check.
 LBs without stale registrations or a critical default set are skipped.
@@ -34,12 +33,12 @@ The process releases the lease and exits when its repair pass finishes.
 
 For a long-running deployment, add `--backend-repair-then-normal` alongside
 `--backend-repair-only --backend-repair-apply`. The leader repairs the managed
-load balancers in health-priority order, then starts the normal controllers in
-the same process. Normal node-port reconciliation uses
-`--max-node-backends-per-backend-set` when set. If a repair pass fails, it
-waits ten minutes and retries; normal reconciliation does not start until a
-full pass succeeds. A replacement leader repeats the repair phase before
-starting normal reconciliation.
+load balancers in health-priority order for up to five minutes, then starts the
+normal controllers in the same process. An in-flight OCI operation completes
+before the startup budget is checked. A failed or incomplete pass is logged;
+normal reconciliation still starts. Normal node-port reconciliation uses
+`--max-node-backends-per-backend-set` when set. A replacement leader repeats
+the repair phase before starting normal reconciliation.
 
 ## Contributing
 

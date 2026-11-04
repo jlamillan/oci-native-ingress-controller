@@ -2,6 +2,7 @@ package nodeBackend
 
 import (
 	"testing"
+	"time"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	ociloadbalancer "github.com/oracle/oci-go-sdk/v65/loadbalancer"
@@ -29,7 +30,7 @@ func TestPlanBackendRepairOnlyRemovesAbsentNodeIPsFromManagedSets(t *testing.T) 
 	}
 }
 
-func TestPlanBackendRepairPreservesLastBackendAndRejectsOverLimitUpdate(t *testing.T) {
+func TestPlanBackendRepairPreservesLastBackend(t *testing.T) {
 	backend := func(ip string) ociloadbalancer.Backend {
 		return ociloadbalancer.Backend{IpAddress: common.String(ip), Port: common.Int(30000)}
 	}
@@ -44,8 +45,11 @@ func TestPlanBackendRepairPreservesLastBackendAndRejectsOverLimitUpdate(t *testi
 	if len(plan.stale) != 0 {
 		t.Fatalf("last backend would be deleted: %+v", plan.stale)
 	}
-	if canUpdateDefault(513, 1, 1) || canUpdateDefault(512, 1, 2) || !canUpdateDefault(512, 2, 2) {
-		t.Fatal("default update capacity gate is incorrect")
+}
+
+func TestRepairBudgetReached(t *testing.T) {
+	if repairBudgetReached(time.Time{}) || repairBudgetReached(time.Now().Add(time.Minute)) || !repairBudgetReached(time.Now().Add(-time.Second)) {
+		t.Fatal("unexpected repair startup budget result")
 	}
 }
 

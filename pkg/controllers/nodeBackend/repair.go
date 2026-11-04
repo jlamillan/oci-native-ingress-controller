@@ -2,6 +2,7 @@ package nodeBackend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -14,7 +15,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const maxLoadBalancerBackends = 512
+var errRepairStartupBudget = errors.New("backend repair startup time budget reached")
 
 type repairTarget struct {
 	class    *networkingv1.IngressClass
@@ -39,9 +40,14 @@ type backendRepairPlan struct {
 	missingSets    []string
 }
 
-// RunRepair makes one bounded pass over load balancers referenced by managed IngressClasses.
-// Without apply, it only logs the plan. A failed apply must not be followed by normal reconciliation.
+// RunRepair makes one pass over load balancers referenced by managed IngressClasses.
+// Without apply, it only logs the plan.
 func (c *Controller) RunRepair(ctx context.Context, apply bool) error {
+	return c.RunRepairUntil(ctx, apply, time.Time{})
+}
+
+// RunRepairUntil stops at safe boundaries after deadline, then lets normal reconciliation continue.
+func (c *Controller) RunRepairUntil(ctx context.Context, apply bool, deadline time.Time) error {
 	classes, err := c.ingressClassLister.List(labels.Everything())
 	if err != nil {
 		klog.ErrorS(err, "Backend repair could not list ingress classes")
@@ -50,6 +56,9 @@ func (c *Controller) RunRepair(ctx context.Context, apply bool) error {
 	targets := make([]repairTarget, 0, len(classes))
 	seen := map[string]bool{}
 	for _, class := range classes {
+		if repairBudgetReached(deadline) {
+			return errRepairStartupBudget
+		}
 		if class.Spec.Controller != c.controllerClass {
 			continue
 		}
@@ -98,7 +107,10 @@ func (c *Controller) RunRepair(ctx context.Context, apply bool) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := c.repairLoadBalancer(ctx, target, apply); err != nil {
+		if repairBudgetReached(deadline) {
+			return errRepairStartupBudget
+		}
+		if err := c.repairLoadBalancerUntil(ctx, target, apply, deadline); err != nil {
 			if apply || util.IsServiceError(err, 429) {
 				klog.ErrorS(err, "Backend repair stopped", "lbID", target.lbID)
 				return err // Do not fan out after an OCI mutation error, especially a tenant 429.
@@ -117,6 +129,10 @@ func (c *Controller) RunRepair(ctx context.Context, apply bool) error {
 }
 
 func (c *Controller) repairLoadBalancer(ctx context.Context, target repairTarget, apply bool) error {
+	return c.repairLoadBalancerUntil(ctx, target, apply, time.Time{})
+}
+
+func (c *Controller) repairLoadBalancerUntil(ctx context.Context, target repairTarget, apply bool, deadline time.Time) error {
 	ingresses, err := util.GetIngressesForClass(c.ingressLister, target.class)
 	if err != nil {
 		return err
@@ -159,7 +175,7 @@ func (c *Controller) repairLoadBalancer(ctx context.Context, target repairTarget
 	}
 	klog.InfoS("Backend repair plan", "lbID", target.lbID, "ingressClass", target.class.Name,
 		"currentTotal", plan.currentTotal, "staleRemovable", len(plan.stale), "afterPrune", plan.afterPrune,
-		"afterDefault", plan.afterDefault, "defaultUpdateFits", plan.defaultPresent && len(defaultBackends) > 0 && canUpdateDefault(plan.afterPrune, plan.currentDefault, len(defaultBackends)),
+		"afterDefault", plan.afterDefault, "defaultUpdatePlanned", plan.defaultPresent && len(defaultBackends) > 0,
 		"missingManagedSets", plan.missingSets,
 		"healthPriority", target.priority, "apply", apply)
 	for _, backend := range plan.stale {
@@ -172,7 +188,12 @@ func (c *Controller) repairLoadBalancer(ctx context.Context, target repairTarget
 	if !apply {
 		return nil
 	}
+	budgetReached := false
 	for _, backend := range plan.stale {
+		if repairBudgetReached(deadline) {
+			budgetReached = true
+			break
+		}
 		currentIPs, err := c.allNodeIPs()
 		if err != nil {
 			return err
@@ -200,14 +221,20 @@ func (c *Controller) repairLoadBalancer(ctx context.Context, target repairTarget
 	if !ok || len(defaultBackends) == 0 {
 		klog.InfoS("Skipping default backend update without a set and desired endpoints", "lbID", target.lbID,
 			"defaultSetPresent", ok, "desiredBackends", len(defaultBackends))
+		if budgetReached {
+			return errRepairStartupBudget
+		}
 		return nil
 	}
-	if !canUpdateDefault(currentTotal, len(defaultSet.Backends), len(defaultBackends)) {
-		klog.InfoS("Skipping default backend update until the LB-wide count fits", "lbID", target.lbID,
-			"currentTotal", currentTotal, "projectedTotal", currentTotal-len(defaultSet.Backends)+len(defaultBackends))
-		return nil
+	klog.V(2).InfoS("Updating default backends; OCI validates the LB-wide limit", "lbID", target.lbID,
+		"currentTotal", currentTotal, "projectedTotal", currentTotal-len(defaultSet.Backends)+len(defaultBackends))
+	if err := target.wrapper.GetLbClient().UpdateBackends(ctx, target.lbID, util.DefaultBackendSetName, defaultBackends); err != nil {
+		return err
 	}
-	return target.wrapper.GetLbClient().UpdateBackends(ctx, target.lbID, util.DefaultBackendSetName, defaultBackends)
+	if budgetReached {
+		return errRepairStartupBudget
+	}
+	return nil
 }
 
 func repairHealthPriority(health *ociloadbalancer.LoadBalancerHealth) int {
@@ -228,8 +255,8 @@ func repairHealthPriority(health *ociloadbalancer.LoadBalancerHealth) int {
 	return 0
 }
 
-func canUpdateDefault(currentTotal, currentDefault, desiredDefault int) bool {
-	return currentTotal <= maxLoadBalancerBackends && currentTotal-currentDefault+desiredDefault <= maxLoadBalancerBackends
+func repairBudgetReached(deadline time.Time) bool {
+	return !deadline.IsZero() && !time.Now().Before(deadline)
 }
 
 func (c *Controller) allNodeIPs() (map[string]bool, error) {

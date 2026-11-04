@@ -171,10 +171,15 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 			if opts.BackendRepairOnly {
 				go func() {
 					runBackendRepair(ctx, opts.BackendRepairApply, opts.BackendRepairThenNormal,
-						backendController.RunRepair, func() {
+						func(ctx context.Context, apply bool) error {
+							if opts.BackendRepairThenNormal {
+								return backendController.RunRepairUntil(ctx, apply, time.Now().Add(5*time.Minute))
+							}
+							return backendController.RunRepair(ctx, apply)
+						}, func() {
 							startNormalControllers()
 							go backendController.Run(opts.NumWorkers, ctx.Done())
-						}, repairDone, 10*time.Minute)
+						}, repairDone)
 				}()
 			} else {
 				startNormalControllers()
@@ -207,28 +212,21 @@ func SetUpControllers(opts types.IngressOpts, ingressClassInformer networkinginf
 }
 
 func runBackendRepair(ctx context.Context, apply, thenNormal bool, repair func(context.Context, bool) error,
-	startNormal func(), done chan<- error, retryDelay time.Duration) {
-	for {
-		err := repair(ctx, apply)
-		if ctx.Err() != nil {
-			return
-		}
-		if !thenNormal {
-			done <- err
-			return
-		}
-		if err == nil {
-			klog.Info("Backend repair completed; starting normal controllers")
-			startNormal()
-			return
-		}
-		klog.ErrorS(err, "Backend repair failed; retrying before normal controllers start", "retryAfter", retryDelay)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(retryDelay):
-		}
+	startNormal func(), done chan<- error) {
+	err := repair(ctx, apply)
+	if ctx.Err() != nil {
+		return
 	}
+	if !thenNormal {
+		done <- err
+		return
+	}
+	if err != nil {
+		klog.ErrorS(err, "Backend repair incomplete; starting normal controllers")
+	} else {
+		klog.Info("Backend repair completed; starting normal controllers")
+	}
+	startNormal()
 }
 
 func fetchCniType(id string, client *containerengine.ContainerEngineClient) (string, error) {

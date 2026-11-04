@@ -4,10 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 )
 
-func TestBackendRepairThenNormalRetriesBeforeStartingControllers(t *testing.T) {
+func TestBackendRepairThenNormalStartsControllersAfterIncompletePass(t *testing.T) {
 	calls := 0
 	normalStarted := 0
 	runBackendRepair(context.Background(), true, true, func(_ context.Context, apply bool) error {
@@ -15,15 +14,12 @@ func TestBackendRepairThenNormalRetriesBeforeStartingControllers(t *testing.T) {
 			t.Fatal("repair apply was disabled")
 		}
 		calls++
-		if calls == 1 {
-			return errors.New("OCI rate limited")
-		}
-		return nil
+		return errors.New("repair incomplete")
 	}, func() {
 		normalStarted++
-	}, nil, time.Millisecond)
-	if calls != 2 || normalStarted != 1 {
-		t.Fatalf("got %d repair calls and %d normal starts, want 2 and 1", calls, normalStarted)
+	}, nil)
+	if calls != 1 || normalStarted != 1 {
+		t.Fatalf("got %d repair calls and %d normal starts, want 1 and 1", calls, normalStarted)
 	}
 }
 
@@ -34,7 +30,7 @@ func TestBackendRepairOnePassReportsFailureWithoutStartingControllers(t *testing
 		return want
 	}, func() {
 		t.Fatal("normal controllers started after failed repair")
-	}, done, time.Minute)
+	}, done)
 	if got := <-done; !errors.Is(got, want) {
 		t.Fatalf("got repair result %v, want %v", got, want)
 	}
